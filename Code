@@ -1,0 +1,210 @@
+#include <WiFi.h>
+#include <Wire.h>
+
+#include "esp_wifi.h"
+
+typedef struct {
+  unsigned frame_ctrl:16;
+  unsigned duration_id:16;
+  uint8_t addr1[6]; /* receiver address */
+  uint8_t addr2[6]; /* sender address */
+  uint8_t addr3[6]; /* filtering address */
+  unsigned sequence_ctrl:16;
+  uint8_t addr4[6]; /* optional */
+} wifi_ieee80211_mac_hdr_t;
+
+typedef struct {
+  wifi_ieee80211_mac_hdr_t hdr;
+  uint8_t payload[0]; /* network data ended with 4 bytes csum (CRC32) */
+} wifi_ieee80211_packet_t;
+
+
+String maclist[16][3]; 
+int listcount = 0;
+
+String KnownMac[10][2] = {  // Put devices you want to be reconized
+  
+  {"Ren PC","D46D6DC06BA6"},
+  {"Deeeptha PHONE","63AAF682F31"},
+  {"Ipad","E244E7806ED6"},
+  {"Deeptha PC","B4EDE45CDFB"},
+  {"NAME","MACADDRESS"},
+  {"NAME","MACADDRESS"},
+  {"NAME","MACADDRESS"},
+  {"NAME","MACADDRESS"}
+  
+};
+
+ const char * wifi_sniffer_packet_type2str(wifi_promiscuous_pkt_type_t type)
+  {switch(type) {
+  case WIFI_PKT_MGMT: return "MGMT";
+  case WIFI_PKT_DATA: return "DATA";
+  default:  
+  case WIFI_PKT_MISC: return "MISC";
+  }
+  }
+
+String defaultTTL = "60"; // Maximum time (Apx seconds) elapsed before device is consirded offline
+
+const wifi_promiscuous_filter_t filt={ 
+    .filter_mask=WIFI_PROMIS_FILTER_MASK_MGMT|WIFI_PROMIS_FILTER_MASK_DATA
+};
+
+typedef struct { 
+  uint8_t mac[6];
+} _attribute_((packed)) MacAddr;
+
+typedef struct { 
+  int16_t fctl;
+  int16_t duration;
+  MacAddr da;
+  MacAddr sa;
+  MacAddr bssid;
+  int16_t seqctl;
+  unsigned char payload[];
+} _attribute_((packed)) WifiMgmtHdr;
+
+
+  
+#define maxCh 13 //max Channel -> US = 11, EU = 13, Japan = 14
+
+
+int curChannel = 1;
+
+
+void sniffer(void* buf, wifi_promiscuous_pkt_type_t type) { //This is where packets end up after they get sniffed
+  wifi_promiscuous_pkt_t p = (wifi_promiscuous_pkt_t)buf; 
+  const wifi_ieee80211_packet_t *ipkt = (wifi_ieee80211_packet_t *)p->payload;
+  const wifi_ieee80211_mac_hdr_t *hdr = &ipkt->hdr;
+  int len = p->rx_ctrl.sig_len;
+  WifiMgmtHdr wh = (WifiMgmtHdr)p->payload;
+  len -= sizeof(WifiMgmtHdr);
+  if (len < 0){
+    Serial.println("Receuved 0");
+    return;
+  }
+  String packet;
+  String mac;
+  String macr;
+  int fctl = ntohs(wh->fctl);
+  for(int i=8;i<=8+6+1;i++){ // This reads the first couple of bytes of the packet. This is where you can read the whole packet replaceing the "8+6+1" with "p->rx_ctrl.sig_len"
+     packet += String(p->payload[i],HEX);
+  }
+  for(int i=0;i<=5;i++){ // This removes the 'nibble' bits from the stat and end of the data we want. So we only get the mac address.
+    mac += String(hdr->addr2[i], HEX);
+    macr += String(hdr->addr1[i], HEX);
+  }
+  mac.toUpperCase();
+  macr.toUpperCase();
+
+   int added = 0;
+  for(int i=0;i<=15;i++){ // checks if the MAC address has been added before
+    if(mac == maclist[i][0]){
+      maclist[i][1] = defaultTTL;
+      if(maclist[i][2] == "OFFLINE"){
+        maclist[i][2] = "0";
+      }
+      added = 1;
+    }
+  }
+  
+  if(added == 0){ // If its new. add it to the array.
+    maclist[listcount][0] = mac;
+    maclist[listcount][1] = defaultTTL;
+    //Serial.println(mac);
+    listcount ++;
+    if(listcount >= 16){
+      listcount = 0;
+    }
+  }
+
+  Serial.println(mac + " : " + macr + " : " + p->rx_ctrl.rssi+ " : " + wifi_sniffer_packet_type2str(type) + " : " +  packet + "\n -- \n" );
+  String forScreen = "";
+  for(int i=0;i<=15;i++){
+    String tmp1 = maclist[i][0];
+    String tmp3 = macr;
+    if(!(tmp1 == "")){
+      for(int j=0;j<=9;j++){
+        String tmp2 = KnownMac[j][1];
+        if(tmp1 == tmp2){
+          forScreen += (KnownMac[j][0] + " : " + maclist[i][2] + "\n");
+          Serial.print(KnownMac[j][0] + " : " + tmp3 + " : " + maclist[i][2] + " : " + p->rx_ctrl.rssi + " : " + wifi_sniffer_packet_type2str(type) + " : " + packet + "\n -- \n");
+          }
+         else if(tmp3 == tmp2){
+          forScreen += (KnownMac[j][0] + " : " + maclist[i][2] + "\n");
+          Serial.print( tmp1 + " : " + KnownMac[j][0] + " : " + maclist[i][2] + " : " + p->rx_ctrl.rssi + " : " + wifi_sniffer_packet_type2str(type) + " : " + packet + "\n -- \n");}
+      }
+    }
+  }
+
+}
+
+
+//===== SETUP =====//
+void setup() {
+
+  /* start Serial */
+  Serial.begin(115200);
+
+  /* setup wifi */
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  esp_wifi_init(&cfg);
+  esp_wifi_set_storage(WIFI_STORAGE_RAM);
+  esp_wifi_set_mode(WIFI_MODE_NULL);
+  esp_wifi_start();
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_promiscuous_filter(&filt);
+  esp_wifi_set_promiscuous_rx_cb(&sniffer);
+  esp_wifi_set_channel(curChannel, WIFI_SECOND_CHAN_NONE);
+  
+  Serial.println("starting!");
+}
+
+void purge(){ // This maanges the TTL
+  for(int i=0;i<=15;i++){
+    if(!(maclist[i][0] == "")){
+      int ttl = (maclist[i][1].toInt());
+      ttl --;
+      if(ttl <= 0){
+        //Serial.println("OFFLINE: " + maclist[i][0]);
+        maclist[i][2] = "OFFLINE";
+        maclist[i][1] = defaultTTL;
+      }else{
+        maclist[i][1] = String(ttl);
+      }
+    }
+  }
+}
+
+void updatetime(){ // This updates the time the device has been online for
+  for(int i=0;i<=15;i++){
+    if(!(maclist[i][0] == "")){
+      if(maclist[i][2] == "")maclist[i][2] = "0";
+      if(!(maclist[i][2] == "OFFLINE")){
+          int timehere = (maclist[i][2].toInt());
+          timehere ++;
+          maclist[i][2] = String(timehere);
+      }
+      
+      //Serial.println(maclist[i][0] + " : " + maclist[i][2]);
+      
+    }
+  }
+}
+
+//===== LOOP =====//
+void loop() {
+    //Serial.println("Channel:" + String(curChannel));
+    if(curChannel > maxCh){ 
+      curChannel = 1;
+    }
+    
+    esp_wifi_set_channel(curChannel, WIFI_SECOND_CHAN_NONE);
+    delay(100);
+    
+    updatetime();
+    purge();
+
+    curChannel++;
+    
+}
